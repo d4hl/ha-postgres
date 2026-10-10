@@ -1,0 +1,78 @@
+---
+# HA PostgreSQL stack for CentOS Stream 10
+#
+# Layers (independent, co-located on the same hosts in this setup):
+#   etcd      — distributed key/value store used as Patroni's DCS
+#   postgres  — PostgreSQL managed by Patroni (streaming replication)
+#   haproxy   — connection routing (primary / replica) behind a keepalived VIP
+#
+# Run everything:
+#   ansible-playbook site.yml
+#
+# Run a single layer by tag:
+#   ansible-playbook site.yml --tags etcd
+#   ansible-playbook site.yml --tags pki,etcd
+#   ansible-playbook site.yml --tags postgresql,patroni
+#   ansible-playbook site.yml --tags haproxy,keepalived
+#   ansible-playbook site.yml --tags common
+#
+# Certificate rotation (issue + serial rolling restart + health checks) is a
+# separate playbook: ansible-playbook rotate-pki.yml
+#
+# Useful variables:
+#   -e etcd_rebootstrap=true   # wipe etcd data dir before start (needed when
+#                              # switching etcd between http:// and https://)
+
+- name: Common system setup
+  hosts: all
+  become: true
+  roles:
+    - role: common
+      tags: [common]
+
+# Issues TLS material for etcd through HashiCorp Vault PKI.
+# The Vault call runs on the control node (delegate_to: localhost): it needs
+# community.hashi_vault + hvac, and VAULT_ADDR / VAULT_TOKEN in the environment
+# (direnv loads ../.env via .envrc — just work inside this repo).
+# Escape hatch when issuance fails: -e vault_pki_no_log=false
+- name: PKI certificates from HashiCorp Vault
+  hosts: all
+  become: true
+  roles:
+    - role: vault_pki
+      tags: [pki, vault]
+
+- name: etcd cluster
+  hosts: etcd
+  become: true
+  roles:
+    - role: etcd
+      tags: [etcd]
+
+- name: PostgreSQL packages
+  hosts: postgres
+  become: true
+  roles:
+    - role: postgresql
+      tags: [postgresql]
+
+- name: Patroni (PostgreSQL high availability)
+  hosts: postgres
+  become: true
+  roles:
+    - role: patroni
+      tags: [patroni]
+
+- name: HAProxy (primary / replica routing)
+  hosts: haproxy
+  become: true
+  roles:
+    - role: haproxy
+      tags: [haproxy]
+
+- name: Keepalived (VRRP VIP)
+  hosts: haproxy
+  become: true
+  roles:
+    - role: keepalived
+      tags: [keepalived]

@@ -1,0 +1,13 @@
+---
+# ===========================================================================
+# PostgreSQL role — native AppStream packaging on CentOS Stream 10.
+#
+# No version detection: the distro packages are not modular, binaries live in
+# /usr/bin and the data directory is /var/lib/pgsql/data. Nothing here is
+# PGDG-style (/usr/pgsql-N, /var/lib/pgsql/N/data).
+# ===========================================================================
+
+postgresql_packages:
+  - postgresql-server
+  - postgresql
+  - postgresql-contrib

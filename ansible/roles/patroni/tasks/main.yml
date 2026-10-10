@@ -1,0 +1,121 @@
+---
+- name: Detect PostgreSQL binary path
+  ansible.builtin.command:
+    cmd: pg_config --bindir
+  register: pg_config_result
+  changed_when: false
+  failed_when: false
+
+- name: Use the detected PostgreSQL binary path
+  ansible.builtin.set_fact:
+    patroni_bin_dir: "{{ pg_config_result.stdout | trim }}"
+  when:
+    - pg_config_result.rc | default(1) == 0
+    - pg_config_result.stdout | default('') | trim | length > 0
+
+# PostgreSQL refuses to start with ssl=on if ssl_cert_file/ssl_key_file are
+# missing or unreadable by the postgres user, so fail early with a hint.
+- name: Check TLS material for Patroni
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  register: patroni_tls_stat
+  loop:
+    - "{{ patroni_etcd_client_cert }}"
+    - "{{ patroni_etcd_client_key }}"
+    - "{{ patroni_pg_cert }}"
+    - "{{ patroni_pg_key }}"
+    - "{{ patroni_ca_cert }}"
+
+- name: Fail when TLS material is missing
+  ansible.builtin.fail:
+    msg: "Missing {{ item.item }} — run `ansible-playbook site.yml --tags pki` first."
+  loop: "{{ patroni_tls_stat.results }}"
+  when: not item.stat.exists
+
+- name: Install system dependencies for Patroni
+  ansible.builtin.dnf:
+    name:
+      - python3
+      - python3-pip
+      - python3-devel
+      - gcc
+      - libpq-devel
+    state: present
+
+- name: Install Patroni with etcd3 support
+  ansible.builtin.pip:
+    name: "{{ patroni_pip_packages }}"
+    state: present
+    executable: pip3
+
+- name: Create Patroni directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: postgres
+    group: postgres
+    mode: "{{ patroni_dir_mode }}"
+  loop:
+    - "{{ patroni_config_dir }}"
+    - "{{ patroni_log_dir }}"
+
+- name: Hand over the TLS material to the postgres user
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    owner: postgres
+    group: postgres
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: "{{ patroni_etcd_client_cert }}", mode: "{{ patroni_cert_mode }}" }
+    - { path: "{{ patroni_etcd_client_key }}", mode: "{{ patroni_key_mode }}" }
+    - { path: "{{ patroni_pg_cert }}", mode: "{{ patroni_cert_mode }}" }
+    - { path: "{{ patroni_pg_key }}", mode: "{{ patroni_key_mode }}" }
+
+- name: Deploy Patroni configuration
+  ansible.builtin.template:
+    src: patroni.yml.j2
+    dest: "{{ patroni_config }}"
+    owner: postgres
+    group: postgres
+    mode: "{{ patroni_config_mode }}"
+  notify: Restart Patroni
+  no_log: true
+
+- name: Deploy Patroni systemd unit
+  ansible.builtin.template:
+    src: patroni.service.j2
+    dest: /etc/systemd/system/patroni.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Reload systemd
+    - Restart Patroni
+
+- name: Open firewall port for the Patroni REST API
+  ansible.posix.firewalld:
+    port: "{{ patroni_port }}/tcp"
+    permanent: true
+    state: enabled
+    immediate: true
+  when: ansible_facts["os_family"] == "RedHat"
+  ignore_errors: true
+
+- name: Ensure etcd is running before Patroni
+  ansible.builtin.systemd:
+    name: etcd
+    state: started
+  when:
+    - "'etcd' in group_names"
+    - not ansible_check_mode | default(false) | bool
+
+- name: Enable and start Patroni
+  ansible.builtin.systemd:
+    name: patroni
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: Push the dynamic configuration to the DCS
+  ansible.builtin.include_tasks: dcs.yml
+  when: patroni_push_dcs | default(true) | bool

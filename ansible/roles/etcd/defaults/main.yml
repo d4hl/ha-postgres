@@ -1,0 +1,34 @@
+---
+# ===========================================================================
+# Generic mechanics for the etcd role.
+# Deployment configuration (paths, ports, names, certificates) lives in
+# group_vars/etcd.yml and group_vars/all.yml.
+# ===========================================================================
+
+# --- Software --------------------------------------------------------------
+etcd_version: "3.6.5"
+etcd_url: "https://github.com/etcd-io/etcd/releases/download/v{{ etcd_version }}/etcd-v{{ etcd_version }}-linux-amd64.tar.gz"
+etcd_tarball: "etcd-v{{ etcd_version }}-linux-amd64.tar.gz"
+etcd_extracted: "etcd-v{{ etcd_version }}-linux-amd64"
+etcd_binaries:
+  - etcd
+  - etcdctl
+  - etcdutl
+etcd_bin_dir: /usr/local/bin
+
+# --- Service account -------------------------------------------------------
+etcd_user: etcd
+etcd_group: etcd
+
+# --- Derived certificate paths (from group_vars/etcd.yml) ------------------
+etcd_peer_cert: "{{ etcd_ssl_dir }}/{{ etcd_peer_cert_file }}"
+etcd_peer_key: "{{ etcd_ssl_dir }}/{{ etcd_peer_key_file }}"
+etcd_ca_cert: "{{ etcd_ssl_dir }}/{{ etcd_ca_file }}"
+
+# --- Permissions -----------------------------------------------------------
+etcd_conf_dir_mode: "0751"   # 0751: others may traverse (Patroni reads ca.crt)
+etcd_ssl_dir_mode: "0755"
+etcd_data_dir_mode: "0700"
+etcd_cert_mode: "0644"
+etcd_key_mode: "0600"
+etcd_conf_mode: "0640"

@@ -1,0 +1,35 @@
+---
+
+# patroni
+patroni_config_dir: /etc/patroni
+patroni_log_dir: /var/log/patroni
+
+patroni_ssl_dir: /etc/patroni/ssl
+
+patroni_etcd_client_cert_file: client.crt
+patroni_etcd_client_key_file: client.key
+patroni_ca_file: ca.crt
+
+patroni_pg_cert_file: node.crt
+patroni_pg_key_file: node.key
+
+# vault pki
+vault_pki_certs_patroni:
+  - name: patroni-etcd-client
+    common_name: "{{ inventory_hostname }}"
+    alt_names: "{{ inventory_hostname }}"
+    ip_sans: "{{ ansible_host }}"
+    dir: "{{ patroni_ssl_dir }}"
+    cert: "{{ patroni_etcd_client_cert_file }}"
+    key: "{{ patroni_etcd_client_key_file }}"
+
+  # for mtls inbetween nodes and for user connections
+  # `localhost`/127.0.0.1 are for Patroni itself: its local replication
+  # connection goes to localhost:5433 with sslmode=verify-full.
+  - name: pg-node
+    common_name: "{{ inventory_hostname }}"
+    alt_names: "{{ [inventory_hostname, 'localhost'] | unique | join(',') }}"
+    ip_sans: "{{ [ansible_host, keepalived_vip, '127.0.0.1'] | unique | join(',') }}"
+    dir: "{{ patroni_ssl_dir }}"
+    cert: "{{ patroni_pg_cert_file }}"
+    key: "{{ patroni_pg_key_file }}"

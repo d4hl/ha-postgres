@@ -1,0 +1,37 @@
+# etcd configuration — managed by Ansible
+# {{ ansible_managed }}
+
+name: {{ etcd_node_name }}
+
+# Peer (etcd-to-etcd)
+listen-peer-urls: https://0.0.0.0:{{ etcd_peer_port }}
+initial-advertise-peer-urls: https://{{ ansible_host }}:{{ etcd_peer_port }}
+
+# Client (etcd API)
+listen-client-urls: https://0.0.0.0:{{ etcd_client_port }}
+advertise-client-urls: https://{{ ansible_host }}:{{ etcd_client_port }}
+
+# Peer mutual TLS — the peer certificate doubles as the server certificate
+peer-transport-security:
+  cert-file: {{ etcd_peer_cert }}
+  key-file: {{ etcd_peer_key }}
+  trusted-ca-file: {{ etcd_ca_cert }}
+  client-cert-auth: true
+{% if etcd_peer_allowed_cn | length > 0 %}
+  allowed-cn: {{ etcd_peer_allowed_cn | to_json }}
+{% endif %}
+
+# Client mutual TLS — clients (Patroni) present their own certificate
+client-transport-security:
+  cert-file: {{ etcd_peer_cert }}
+  key-file: {{ etcd_peer_key }}
+  trusted-ca-file: {{ etcd_ca_cert }}
+  client-cert-auth: true
+
+# Cluster
+initial-cluster: {{ etcd_initial_cluster_list | join(',') }}
+initial-cluster-state: {{ etcd_initial_cluster_state }}
+cluster-name: {{ etcd_cluster_name }}
+
+# Data
+data-dir: {{ etcd_data_dir }}

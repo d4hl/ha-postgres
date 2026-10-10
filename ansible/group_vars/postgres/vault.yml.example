@@ -1,0 +1,8 @@
+---
+# Скопируй в vault.yml и заполни.
+patroni_replication_user: replicator
+patroni_replication_password: CHANGE_ME
+patroni_superuser: postgres
+patroni_superuser_password: CHANGE_ME
+patroni_rewind_user: postgres
+patroni_rewind_password: CHANGE_ME

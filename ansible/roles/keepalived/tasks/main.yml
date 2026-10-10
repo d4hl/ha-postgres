@@ -1,0 +1,64 @@
+---
+- name: Install Keepalived
+  ansible.builtin.dnf:
+    name: keepalived
+    state: present
+
+- name: Determine network interface for VIP
+  ansible.builtin.set_fact:
+    keepalived_interface: "{{ keepalived_interface | default(ansible_facts[\"default_ipv4\"].interface) }}"
+
+- name: Deploy HAProxy health check script
+  ansible.builtin.template:
+    src: check_haproxy.sh.j2
+    dest: /usr/local/bin/check_haproxy.sh
+    owner: root
+    group: root
+    mode: "0755"
+
+# Allow keepalived to run the health check script (SELinux)
+- name: Assign to health check script default SEL type of unconfined_script
+  community.general.sefcontext:
+    target: "/usr/local/bin/check_haproxy.sh"
+    setype: keepalived_unconfined_script_exec_t
+    state: present
+
+- name: Apply the SELinux label to the health check script
+  ansible.builtin.command:
+    cmd: restorecon -v /usr/local/bin/check_haproxy.sh
+  register: keepalived_check_restorecon
+  changed_when: "'Relabeled' in keepalived_check_restorecon.stdout"
+
+- name: Deploy Keepalived configuration
+  ansible.builtin.template:
+    src: keepalived.conf.j2
+    dest: /etc/keepalived/keepalived.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart Keepalived
+  no_log: true
+
+- name: Open firewall for VRRP (IP protocol 112)
+  ansible.posix.firewalld:
+    protocol: vrrp
+    permanent: true
+    state: enabled
+    immediate: true
+  when: ansible_facts["os_family"] == "RedHat"
+  ignore_errors: true
+
+- name: Open firewall for VRRP (rich rule — subnet restrict)
+  ansible.posix.firewalld:
+    rich_rule: 'rule family="ipv4" source address="192.168.100.0/24" protocol value="vrrp" accept'
+    permanent: true
+    state: enabled
+    immediate: true
+  when: ansible_facts["os_family"] == "RedHat"
+  ignore_errors: true
+
+- name: Enable and start Keepalived
+  ansible.builtin.systemd:
+    name: keepalived
+    enabled: true
+    state: started

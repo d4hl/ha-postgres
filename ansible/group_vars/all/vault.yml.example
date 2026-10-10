@@ -1,0 +1,10 @@
+---
+# Скопируй в vault.yml и заполни. См. group_vars/all/main.yml.
+patroni_api_user: patroni
+patroni_api_password: CHANGE_ME
+
+# только если vault_pki_auth_method: token
+vault_token: CHANGE_ME
+# только если vault_pki_auth_method: approle
+vault_pki_role_id: CHANGE_ME
+vault_pki_secret_id: CHANGE_ME

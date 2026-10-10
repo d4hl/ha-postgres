@@ -1,0 +1,50 @@
+---
+# ===========================================================================
+# Environment-wide configuration — the single source of truth.
+#
+#   group_vars/all.yml        environment + cross-layer interfaces + Vault PKI
+#   group_vars/<layer>.yml    per-layer config (paths, ports, cert definitions)
+#   roles/*/defaults/main.yml only generic mechanics (versions, URLs, modes)
+#
+# Roles must not hold deployment paths or addresses.
+# ===========================================================================
+
+# --- General ---------------------------------------------------------------
+timezone: Europe/Berlin
+cluster_name: postgres-ha
+upgrade_packages: false
+ansible_python_interpreter: /usr/bin/python3
+
+# --- Cross-layer interfaces (ports one layer connects to in another) -------
+etcd_client_port: 2379    # etcd API     : Patroni -> etcd
+postgresql_port: 5433     # PostgreSQL   : HAProxy  -> Patroni
+patroni_port: 8008        # Patroni REST : HAProxy  -> Patroni (health checks)
+
+keepalived_vip: 192.168.100.100
+
+# --- HashiCorp Vault PKI (TLS material) ------------------------------------
+vault_pki_mount: pki
+vault_pki_role_name: any-domain
+vault_pki_ttl: 720h
+vault_pki_renew_threshold: 604800   # re-issue when < 7 days remain (TTL is 30d)
+vault_pki_force_renew: false        # true = re-issue even if still valid
+
+# token | approle
+vault_pki_auth_method: approle
+
+# Root CA of the PKI mount, shipped with the repo (files/). Vault's `ca_chain`
+# stops at the issuing intermediate when the root is kept outside Vault, and
+# OpenSSL (libpq, PostgreSQL) refuses to terminate a chain at a non-self-signed
+# trust anchor — "unable to get issuer certificate". So the root is appended to
+# every ca.crt the role writes.
+vault_pki_root_ca_file: "{{ inventory_dir }}/files/root-ca.crt"
+
+# Certificates are declared by each layer (vault_pki_certs_<layer>); a host
+# receives the union of the layers whose groups it belongs to.
+#   etcd     -> peer certificate            (used by the etcd daemon)
+#   postgres -> client + node certificate   (Patroni: etcd, replication, TLS)
+#   haproxy  -> stats page certificate      (HAProxy `bind ... ssl crt`)
+vault_pki_certs: >-
+  {{ (vault_pki_certs_etcd | default([]))
+     + (vault_pki_certs_patroni | default([]))
+     + (vault_pki_certs_haproxy | default([])) }}

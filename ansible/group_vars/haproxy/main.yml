@@ -1,0 +1,31 @@
+---
+# haproxy
+haproxy_primary_port: 5432   # external: writable endpoint (Patroni primary)
+haproxy_replica_port: 5434   # external: read-only endpoint  (Patroni replicas)
+haproxy_stats_port: 7000
+
+haproxy_ssl_dir: /etc/haproxy/ssl
+# INPUT — the two files Vault PKI writes
+haproxy_stats_cert_file: stats.cert.pem   # leaf + chain
+haproxy_stats_key_file: stats.key.pem     # private key
+# OUTPUT — generated bundle that `bind ... ssl crt` actually points at.
+# HAProxy needs cert and key in ONE file
+haproxy_stats_pem: "{{ haproxy_ssl_dir }}/stats.pem"
+
+# keepalived
+keepalived_vrid: 51
+keepalived_priority: 100
+# keepalived_auth_pass lives in group_vars/haproxy/vault.yml (git-ignored).
+keepalived_notification_email: root@localhost
+keepalived_smtp_server: 127.0.0.1
+# keepalived_interface: eth0   # auto-detected from ansible_default_ipv4
+
+# vault pki, used for vault group
+vault_pki_certs_haproxy:
+  - name: haproxy-stats
+    common_name: "{{ inventory_hostname }}"
+    alt_names: "{{ inventory_hostname }}"
+    ip_sans: "{{ [ansible_host, keepalived_vip] | unique | join(',') }}"
+    dir: "{{ haproxy_ssl_dir }}"
+    cert: "{{ haproxy_stats_cert_file }}"
+    key: "{{ haproxy_stats_key_file }}"

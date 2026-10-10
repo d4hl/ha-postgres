@@ -1,0 +1,74 @@
+# HAProxy configuration — managed by Ansible
+# {{ ansible_managed }}
+
+userlist stats_users
+    user {{ haproxy_stats_user }} password {{ haproxy_stats_password | password_hash('sha512', haproxy_stats_password_salt) }}
+
+global
+    daemon
+    maxconn 4096
+    log /dev/log local0
+    log /dev/log local1 notice
+    stats socket /var/lib/haproxy/stats
+    user haproxy
+    group haproxy
+    # Refuse TLS < 1.2 (only the stats page terminates TLS here — PostgreSQL
+    # traffic is pass-through, so the two `server-options` are unused).
+    ssl-default-bind-options ssl-min-ver TLSv1.2
+    ssl-default-server-options ssl-min-ver TLSv1.2
+
+defaults
+    log global
+    mode tcp
+    option tcplog
+    option dontlognull
+    retries 3
+    timeout connect 5s
+    timeout client 30s
+    timeout server 30s
+    timeout check 5s
+    maxconn 4096
+
+# postgres primary
+frontend pgsql_primary
+    bind 0.0.0.0:{{ haproxy_primary_port  }}
+    mode tcp
+    default_backend postgres_primary
+
+backend postgres_primary
+    mode tcp
+    option httpchk
+    http-check send meth GET uri /master hdr Authorization "Basic {{ (patroni_api_user ~ ':' ~ patroni_api_password) | b64encode }}"
+    http-check expect status 200
+    default-server inter 2s fall 2 rise 2
+{% for host in groups['postgres'] %}
+    server {{ host }} {{ hostvars[host].ansible_host }}:{{ postgresql_port }} check port {{ patroni_port }}
+{% endfor %}
+
+# postgres replica
+frontend pgsql_replica
+    bind 0.0.0.0:{{ haproxy_replica_port }}
+    mode tcp
+    default_backend postgres_replica
+
+backend postgres_replica
+    mode tcp
+    option httpchk
+    http-check send meth GET uri /replica hdr Authorization "Basic {{ (patroni_api_user ~ ':' ~ patroni_api_password) | b64encode }}"
+    http-check expect status 200
+    default-server inter 2s fall 2 rise 2
+{% for host in groups['postgres'] %}
+    server {{ host }} {{ hostvars[host].ansible_host }}:{{ postgresql_port }} check port {{ patroni_port }}
+{% endfor %}
+
+# haproxy stats (TLS; `crt` is the concatenated cert+key bundle built by the role)
+frontend stats
+    bind 0.0.0.0:{{ haproxy_stats_port }} ssl crt {{ haproxy_stats_pem }}
+    mode http
+    stats enable
+    stats uri /
+    stats refresh 5s
+    stats show-legends
+    stats admin if TRUE
+    acl stats_authenticated http_auth(stats_users)
+    http-request auth unless stats_authenticated

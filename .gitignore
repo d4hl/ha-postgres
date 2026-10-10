@@ -1,0 +1,4 @@
+.direnv
+/.env
+**/group_vars/*/vault.yml
+

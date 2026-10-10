@@ -1,0 +1,158 @@
+---
+- name: Check Vault-issued TLS material is present
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  register: etcd_tls_stat
+  loop:
+    - "{{ etcd_peer_cert }}"
+    - "{{ etcd_peer_key }}"
+    - "{{ etcd_ca_cert }}"
+
+- name: Fail when TLS material is missing
+  ansible.builtin.fail:
+    msg: "Missing {{ item.item }} — run `ansible-playbook site.yml --tags pki` first."
+  loop: "{{ etcd_tls_stat.results }}"
+  when: not item.stat.exists
+
+- name: Download etcd tarball
+  ansible.builtin.get_url:
+    url: "{{ etcd_url }}"
+    dest: /tmp/{{ etcd_tarball }}
+    mode: "0644"
+
+- name: Extract etcd
+  ansible.builtin.unarchive:
+    src: /tmp/{{ etcd_tarball }}
+    dest: /tmp
+    remote_src: true
+    creates: /tmp/{{ etcd_extracted }}/etcd
+
+- name: Install etcd binaries
+  ansible.builtin.copy:
+    src: "/tmp/{{ etcd_extracted }}/{{ item }}"
+    dest: "{{ etcd_bin_dir }}/{{ item }}"
+    mode: "0755"
+    remote_src: true
+  loop: "{{ etcd_binaries }}"
+
+- name: Create etcd group
+  become: true
+  ansible.builtin.group:
+    name: "{{ etcd_group }}"
+    system: true
+    state: present
+
+- name: Create etcd system user
+  ansible.builtin.user:
+    name: "{{ etcd_user }}"
+    group: "{{ etcd_group }}"
+    system: true
+    shell: /sbin/nologin
+    home: "{{ etcd_data_dir }}"
+    create_home: false
+
+- name: Remove leftover self-signed artifacts
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ etcd_ssl_dir }}/ca.key"
+    - "{{ etcd_ssl_dir }}/ca.srl"
+    - /tmp/etcd-peer.csr
+
+- name: Remove stale client certificate from the etcd directory
+  ansible.builtin.file:
+    path: "{{ etcd_ssl_dir }}/{{ item }}"
+    state: absent
+  loop:
+    - client.crt
+    - client.key
+  when: etcd_ssl_dir != (patroni_ssl_dir | default(''))
+
+- name: Wipe etcd data directory (explicit rebootstrap)
+  ansible.builtin.file:
+    path: "{{ etcd_data_dir }}"
+    state: absent
+  when: etcd_rebootstrap | default(false) | bool
+
+- name: Create etcd directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner }}"
+    group: "{{ item.group }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: "{{ etcd_conf_dir }}", owner: root, group: "{{ etcd_group }}", mode: "{{ etcd_conf_dir_mode }}" }
+    - { path: "{{ etcd_ssl_dir }}", owner: root, group: root, mode: "{{ etcd_ssl_dir_mode }}" }
+    - { path: "{{ etcd_data_dir }}", owner: "{{ etcd_user }}", group: "{{ etcd_group }}", mode: "{{ etcd_data_dir_mode }}" }
+
+- name: Set ownership and permissions on TLS material
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    owner: "{{ item.owner }}"
+    group: "{{ item.group }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: "{{ etcd_ca_cert }}", owner: root, group: root, mode: "{{ etcd_cert_mode }}" }
+    - { path: "{{ etcd_peer_cert }}", owner: root, group: root, mode: "{{ etcd_cert_mode }}" }
+    - { path: "{{ etcd_peer_key }}", owner: "{{ etcd_user }}", group: "{{ etcd_group }}", mode: "{{ etcd_key_mode }}" }
+
+- name: Build etcd initial-cluster list
+  ansible.builtin.set_fact:
+    etcd_initial_cluster_list: >-
+      {%- set nodes = [] -%}
+      {%- for host in groups['etcd'] -%}
+      {%- set _ = nodes.append(hostvars[host].etcd_node_name + '=https://' + hostvars[host].ansible_host + ':' + (etcd_peer_port | string)) -%}
+      {%- endfor -%}
+      {{- nodes -}}
+
+- name: Detect existing etcd data
+  ansible.builtin.find:
+    paths: "{{ etcd_data_dir }}"
+    hidden: true
+    file_type: any
+  register: etcd_data_dir_contents
+
+- name: Set etcd cluster state
+  ansible.builtin.set_fact:
+    etcd_initial_cluster_state: "{{ 'existing' if etcd_data_dir_contents.matched | int > 0 else 'new' }}"
+
+- name: Deploy etcd config
+  ansible.builtin.template:
+    src: etcd.conf.j2
+    dest: "{{ etcd_conf_dir }}/etcd.conf"
+    owner: root
+    group: "{{ etcd_group }}"
+    mode: "{{ etcd_conf_mode }}"
+  notify: Restart etcd
+
+- name: Deploy etcd systemd unit
+  ansible.builtin.template:
+    src: etcd.service.j2
+    dest: /etc/systemd/system/etcd.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Reload systemd
+    - Restart etcd
+
+- name: Open firewall ports for etcd
+  ansible.posix.firewalld:
+    port: "{{ item }}/tcp"
+    permanent: true
+    state: enabled
+    immediate: true
+  loop:
+    - "{{ etcd_client_port }}"
+    - "{{ etcd_peer_port }}"
+  when: ansible_facts["os_family"] == "RedHat"
+  ignore_errors: true
+
+- name: Enable and start etcd
+  ansible.builtin.systemd:
+    name: etcd
+    enabled: true
+    state: started
+    daemon_reload: true

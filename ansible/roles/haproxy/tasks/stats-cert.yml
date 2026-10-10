@@ -1,0 +1,30 @@
+---
+# Builds the single PEM that `bind ... ssl crt` points at.
+#
+# HAProxy cannot take the private key from a separately named file: it only
+# appends `.key` to the `crt` path (which would be `stats.cert.pem.key`), while
+# Vault PKI writes the key as `stats.key.pem`. So the parts are concatenated
+# here — leaf + chain, then the key.
+#
+# Included by the haproxy role and by rotate-pki.yml (a renewed certificate has
+# to be re-bundled before HAProxy is restarted). Sets `haproxy_stats_bundle`;
+# the caller decides whether a restart is needed.
+
+- name: Read the stats certificate and private key
+  ansible.builtin.slurp:
+    src: "{{ item }}"
+  register: haproxy_stats_parts
+  loop:
+    - "{{ haproxy_ssl_dir }}/{{ haproxy_stats_cert_file }}"
+    - "{{ haproxy_ssl_dir }}/{{ haproxy_stats_key_file }}"
+  no_log: true
+
+- name: Build the stats certificate + key bundle
+  ansible.builtin.copy:
+    content: "{{ haproxy_stats_parts.results | map(attribute='content') | map('b64decode') | join('') }}"
+    dest: "{{ haproxy_stats_pem }}"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  register: haproxy_stats_bundle

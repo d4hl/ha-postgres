@@ -1,0 +1,60 @@
+---
+- name: Set timezone
+  community.general.timezone:
+    name: "{{ timezone }}"
+  when: timezone is defined
+
+- name: Install EPEL (Extra Packages for Enterprise Linux)
+  ansible.builtin.dnf:
+    name:
+      - epel-release
+    state: present
+  when: ansible_facts["os_family"] == "RedHat"
+  register: epel_result
+  ignore_errors: true
+
+- name: Enable CRB (CodeReady Builder) repository
+  ansible.builtin.command:
+    cmd: dnf config-manager --set-enabled crb
+  when: ansible_facts["os_family"] == "RedHat"
+  changed_when: false
+  ignore_errors: true
+
+- name: Install base packages
+  ansible.builtin.dnf:
+    name:
+      - wget
+      - curl
+      - tar
+      - gzip
+      - python3
+      - python3-pip
+      - python3-libs
+      - policycoreutils-python-utils
+      - firewalld
+      - vim-minimal
+      - bind-utils
+      - openssl
+      - openssl-devel
+    state: present
+
+- name: Enable and start firewalld
+  ansible.builtin.systemd:
+    name: firewalld
+    enabled: true
+    state: started
+
+- name: Configure /etc/hosts with cluster nodes
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    line: "{{ hostvars[item].ansible_host }} {{ item }}"
+    regexp: ".*\\s{{ item }}$"
+    state: present
+  loop: "{{ groups['all'] }}"
+  when: hostvars[item].ansible_host is defined
+
+- name: Upgrade all packages
+  ansible.builtin.dnf:
+    name: "*"
+    state: latest
+  when: upgrade_packages | default(false) | bool

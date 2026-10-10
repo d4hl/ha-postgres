@@ -1,0 +1,68 @@
+# Keepalived configuration — managed by Ansible
+# {{ ansible_managed }}
+
+global_defs {
+    notification_email {
+        {{ keepalived_notification_email }}
+    }
+    notification_email_from {{ ansible_facts["fqdn"] }}@keepalived
+    smtp_server {{ keepalived_smtp_server }}
+    smtp_connect_timeout 30
+    router_id {{ inventory_hostname }}
+    enable_script_security
+}
+
+# Script to check HAProxy health
+vrrp_script check_haproxy {
+    script "/usr/local/bin/check_haproxy.sh"
+    interval 2          # Check every 2 seconds
+    weight 2             # Priority weight
+    rise 2               # Number of successes to declare UP
+    fall 3               # Number of failures to declare DOWN
+    timeout 10
+    user root
+}
+
+# VRRP instance for PostgreSQL VIP
+vrrp_instance VI_PostgreSQL {
+    interface {{ keepalived_interface }}
+    virtual_router_id {{ keepalived_vrid }}
+    priority {{ keepalived_priority }}
+    advert_int 1
+    nopreempt
+    authentication {
+        auth_type PASS
+        auth_pass {{ keepalived_auth_pass }}
+    }
+    virtual_ipaddress {
+        {{ keepalived_vip }}/24
+    }
+    track_script {
+        check_haproxy
+    }
+}
+
+# LVS configuration (optional, for future use)
+# lvs_tcp_server lvs_cluster {
+#     apply_to {{ keepalived_vip }}
+#     HA调度器 rr
+#     virtual_server {
+#         delay_loop 6
+#         lb_algo rr
+#         lb_kind NAT
+#         persistence_timeout 50
+#         protocol TCP
+#         real_server {
+#             real_server 192.168.100.101 5432
+#             weight 1
+#         }
+#         real_server {
+#             real_server 192.168.100.102 5432
+#             weight 1
+#         }
+#         real_server {
+#             real_server 192.168.100.103 5432
+#             weight 1
+#         }
+#     }
+# }

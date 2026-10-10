@@ -1,0 +1,26 @@
+---
+vault_pki_mount: pki
+vault_pki_role_name: any-domain
+vault_pki_ttl: 720h
+
+# Re-issue when the existing certificate has less than this many seconds left.
+vault_pki_renew_threshold: 604800   # 7 days
+
+# Re-issue unconditionally (required after changing a common_name / SANs,
+# because the "still valid" check would otherwise skip renewal).
+vault_pki_force_renew: false
+
+# Hide the Vault response (it contains the private key) from the task output.
+# Set to false to see Vault's own error message when issuance fails:
+#   ansible-playbook site.yml --tags pki -e vault_pki_no_log=false
+vault_pki_no_log: true
+
+# Auto generated
+# Certificates to manage. Entries are contributed by layer group_vars:
+#   vault_pki_certs: "{{ vault_pki_certs_etcd + vault_pki_certs_patroni }}"
+vault_pki_certs: []
+
+# vault_pki_auth_method: approle | token
+# vault_token = "..."
+# vault_pki_role_id: "..."
+# vault_pki_secret_id: "..."

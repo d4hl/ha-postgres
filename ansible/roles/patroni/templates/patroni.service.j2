@@ -1,0 +1,25 @@
+[Unit]
+Description=Patroni: PostgreSQL High Availability
+Documentation=https://patroni.readthedocs.io/
+After=etcd.service
+Wants=etcd.service
+
+[Service]
+Type=simple
+User=postgres
+Group=postgres
+ExecStart=/usr/local/bin/patroni {{ patroni_config }}
+ExecReload=/bin/kill -s HUP $MAINPID
+Restart=on-failure
+RestartSec=10s
+LimitNOFILE=65536
+TimeoutStopSec=30s
+
+# Security hardening
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

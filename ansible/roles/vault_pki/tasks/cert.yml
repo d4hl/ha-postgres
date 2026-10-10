@@ -1,0 +1,101 @@
+---
+- name: "{{ cert.name }} | check the existing certificate"
+  ansible.builtin.command:
+    cmd: "openssl x509 -checkend {{ vault_pki_renew_threshold }} -noout -in {{ cert.dir }}/{{ cert.cert }}"
+  register: vault_cert_check
+  changed_when: false
+  failed_when: false
+
+- name: "{{ cert.name }} | check the rest of the material"
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  register: vault_cert_rest
+  loop:
+    - "{{ cert.dir }}/{{ cert.key }}"
+    - "{{ cert.dir }}/ca.crt"
+
+- name: "{{ cert.name }} | decide whether to issue"
+  vars:
+    _needs_issue: >-
+      {{ (vault_pki_force_renew | bool)
+         or (vault_cert_check.rc != 0)
+         or (vault_cert_rest.results | rejectattr('stat.exists') | list | length > 0) }}
+  ansible.builtin.set_fact:
+    vault_cert_needs_issue: "{{ _needs_issue }}"
+    # Accumulates over the certificate loop (per host). rotate-pki.yml uses it to
+    # decide whether the dependent service has to be restarted: a renewed file
+    # on disk does not update a running process.
+    vault_pki_changed: "{{ (vault_pki_changed | default(false) | bool) or (_needs_issue | bool) }}"
+
+- name: "{{ cert.name }} | issue certificate from Vault PKI"
+  community.hashi_vault.vault_pki_generate_certificate:
+    # url/token are omitted when the variables are unset: the module then falls
+    # back to $VAULT_ADDR / $VAULT_TOKEN itself.
+    url: "{{ vault_addr | default(omit) }}"
+    token: "{{ vault_token | default(omit) }}"
+    auth_method: "{{ vault_pki_auth_method | default(omit) }}"
+    role_id: "{{ vault_pki_role_id | default(omit) }}"
+    secret_id: "{{ vault_pki_secret_id | default(omit) }}"
+    engine_mount_point: "{{ vault_pki_mount }}"
+    role_name: "{{ vault_pki_role_name }}"
+    common_name: "{{ cert.common_name }}"
+    alt_names: "{{ cert.alt_names | default([], true) }}"   # list or "a,b"
+    ip_sans: "{{ cert.ip_sans | default([], true) }}"       # list or "a,b"
+    ttl: "{{ vault_pki_ttl }}"
+  register: vault_cert_issue
+  delegate_to: localhost
+  become: false
+  # The response carries the private key: hide it unless explicitly debugging
+  # (re-run with -e vault_pki_no_log=false to see Vault's error message).
+  no_log: "{{ vault_pki_no_log }}"
+  when: vault_cert_needs_issue
+
+- name: "{{ cert.name }} | remember the CA chain"
+  ansible.builtin.set_fact:
+    vault_cert_ca: >-
+      {{ (vault_cert_issue.data.data.ca_chain
+          | default([vault_cert_issue.data.data.issuing_ca], true)) | join('\n') }}
+  when: vault_cert_needs_issue
+
+- name: "{{ cert.name }} | ensure certificate directory"
+  ansible.builtin.file:
+    path: "{{ cert.dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "{{ cert.dir_mode | default('0755') }}"
+
+# Запись всегда под root, права меняются позже в своей роли, костыль
+- name: "{{ cert.name }} | write certificate (leaf + chain)"
+  ansible.builtin.copy:
+    content: "{{ vault_cert_issue.data.data.certificate }}\n{{ vault_cert_ca }}\n"
+    dest: "{{ cert.dir }}/{{ cert.cert }}"
+    owner: root
+    group: root
+    mode: "0644"
+  when: vault_cert_needs_issue
+
+- name: "{{ cert.name }} | write private key"
+  ansible.builtin.copy:
+    content: "{{ vault_cert_issue.data.data.private_key }}"
+    dest: "{{ cert.dir }}/{{ cert.key }}"
+    owner: root
+    group: root
+    mode: "0640"
+  no_log: true
+  when: vault_cert_needs_issue
+
+- name: "{{ cert.name }} | write CA (issuing CA + root)"
+  ansible.builtin.copy:
+    # Vault returns only the issuing intermediate here; clients (libpq,
+    # PostgreSQL, etcd) need the self-signed root as a real trust anchor.
+    content: "{{ vault_cert_ca }}\n{{ lookup('file', vault_pki_root_ca_file) }}"
+    dest: "{{ cert.dir }}/ca.crt"
+    owner: root
+    group: root
+    mode: "0644"
+  when: vault_cert_needs_issue
+
+- name: "{{ cert.name }} | report"
+  ansible.builtin.debug:
+    msg: "{{ cert.name }}: {{ 'issued from Vault' if vault_cert_needs_issue else 'still valid — skipped' }} ({{ cert.dir }}/{{ cert.cert }})"

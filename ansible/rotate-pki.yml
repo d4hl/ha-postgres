@@ -1,0 +1,171 @@
+---
+# Rolling rotation of Vault-issued TLS material.
+#
+#   ansible-playbook rotate-pki.yml                                # renew what is close to expiry
+#   ansible-playbook rotate-pki.yml -e vault_pki_force_renew=true  # force (new CN/SAN/CA)
+
+- name: Roll certificates and restart dependent services, one host at a time
+  hosts: all
+  become: true
+  serial: 1
+  roles:
+    - role: vault_pki
+      tags: [issue, pki]
+  tasks:
+    - name: Rolling restart of an etcd member
+      when:
+        - "'etcd' in group_names"
+        - vault_pki_changed | default(false) | bool
+      tags: [restart]
+      block:
+        - name: Check that etcd is deployed on this host
+          ansible.builtin.stat:
+            path: /etc/systemd/system/etcd.service
+          register: rotate_etcd_unit
+
+        - name: Restart etcd (renewed peer certificate)
+          ansible.builtin.systemd:
+            name: etcd
+            state: restarted
+          when: rotate_etcd_unit.stat.exists
+
+        - name: Wait until the member is healthy again
+          ansible.builtin.command:
+            cmd: >-
+              /usr/local/bin/etcdctl
+              --endpoints=https://{{ ansible_host }}:{{ etcd_client_port }}
+              --cacert={{ etcd_ssl_dir }}/{{ etcd_ca_file }}
+              --cert={{ etcd_ssl_dir }}/{{ etcd_peer_cert_file }}
+              --key={{ etcd_ssl_dir }}/{{ etcd_peer_key_file }}
+              endpoint health
+          register: rotate_etcd_health
+          until: rotate_etcd_health.rc == 0
+          retries: 30
+          delay: 2
+          changed_when: false
+          when: rotate_etcd_unit.stat.exists
+
+    - name: Rolling restart of Patroni
+      when:
+        - "'postgres' in group_names"
+        - vault_pki_changed | default(false) | bool
+      tags: [restart]
+      block:
+        - name: Check that Patroni is deployed on this host
+          ansible.builtin.stat:
+            path: /etc/systemd/system/patroni.service
+          register: rotate_patroni_unit
+
+        - name: Restart Patroni (renewed client certificate)
+          ansible.builtin.systemd:
+            name: patroni
+            state: restarted
+          when: rotate_patroni_unit.stat.exists
+
+        - name: Wait until the local REST API answers
+          ansible.builtin.uri:
+            url: "http://127.0.0.1:{{ patroni_port }}/health"
+            url_username: "{{ patroni_api_user }}"
+            url_password: "{{ patroni_api_password }}"
+            force_basic_auth: true
+            status_code: 200
+          register: rotate_patroni_health
+          until: rotate_patroni_health.status == 200
+          retries: 30
+          delay: 2
+          changed_when: false
+          when: rotate_patroni_unit.stat.exists
+
+    - name: Reload PostgreSQL so it picks up the renewed server certificate
+      when:
+        - "'postgres' in group_names"
+        - vault_pki_changed | default(false) | bool
+      tags: [restart]
+      block:
+        - name: Check that PostgreSQL is managed by Patroni on this host
+          ansible.builtin.stat:
+            path: /etc/systemd/system/patroni.service
+          register: rotate_pg_unit
+
+        - name: Ask PostgreSQL to reload its configuration
+          ansible.builtin.command:
+            cmd: /usr/bin/psql -XtA -c "SELECT pg_reload_conf()"
+          become: true
+          become_user: postgres
+          register: rotate_pg_reload
+          changed_when: "'t' in rotate_pg_reload.stdout"
+          when: rotate_pg_unit.stat.exists
+
+    # HAProxy reads certificates once at startup (there is no reload path for
+    # `bind ... ssl crt`), so the stats page needs a restart. `serial: 1` keeps
+    # the other nodes serving; a brief VIP move is possible and harmless.
+    - name: Rolling restart of HAProxy
+      when:
+        - "'haproxy' in group_names"
+        - vault_pki_changed | default(false) | bool
+      tags: [restart]
+      block:
+        - name: Check that HAProxy is deployed on this host
+          ansible.builtin.stat:
+            path: /etc/haproxy/haproxy.cfg
+          register: rotate_haproxy_cfg
+
+        # A renewed certificate is useless until it is re-bundled into the single
+        # PEM that `crt` points at (same task file the haproxy role uses).
+        - name: Rebuild the stats TLS bundle from the renewed certificate
+          ansible.builtin.include_tasks: roles/haproxy/tasks/stats-cert.yml
+          when: rotate_haproxy_cfg.stat.exists
+
+        - name: Restart HAProxy (renewed stats certificate)
+          ansible.builtin.systemd:
+            name: haproxy
+            state: restarted
+          when: rotate_haproxy_cfg.stat.exists
+
+        # Full handshake against the real listener: trust chain via the Vault CA
+        # and the hostname against the certificate's DNS SAN.
+        - name: Wait until the stats page answers with a valid certificate
+          ansible.builtin.shell:
+            cmd: >-
+              openssl s_client
+              -connect {{ ansible_host }}:{{ haproxy_stats_port }}
+              -CAfile {{ haproxy_ssl_dir }}/ca.crt
+              -verify_hostname {{ inventory_hostname }}
+              -verify_return_error -brief
+              </dev/null
+          register: rotate_haproxy_tls
+          until: rotate_haproxy_tls.rc == 0
+          retries: 30
+          delay: 2
+          changed_when: false
+          when: rotate_haproxy_cfg.stat.exists
+
+- name: Check that the cluster still has a leader
+  hosts: postgres
+  become: false
+  run_once: true
+  tags: [verify]
+  tasks:
+    - name: Read the cluster state from the Patroni REST API
+      ansible.builtin.uri:
+        url: "http://{{ ansible_host }}:{{ patroni_port }}/cluster"
+        url_username: "{{ patroni_api_user }}"
+        url_password: "{{ patroni_api_password }}"
+        force_basic_auth: true
+      register: rotate_cluster_state
+      # This Patroni returns the cluster view only: the leader is the member
+      # whose role is "leader" (no top-level `leader` key).
+      until: >-
+        (rotate_cluster_state.json.members | default([])
+         | selectattr('role', 'equalto', 'leader') | list | length) > 0
+      retries: 30
+      delay: 2
+      changed_when: false
+
+    - name: Report the leader
+      ansible.builtin.debug:
+        msg: >-
+          Cluster leader after rotation:
+          {{ (rotate_cluster_state.json.members | default([])
+              | selectattr('role', 'equalto', 'leader')
+              | map(attribute='name') | list | join(', ')) | default('NONE', true) }}

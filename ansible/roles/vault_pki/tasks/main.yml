@@ -1,0 +1,35 @@
+---
+# Issues TLS material from HashiCorp Vault PKI.
+# One certificate: check expiry -> issue via Vault PKI -> install on the host.
+#
+# The Vault call happens on the control node
+#
+# Control node requirements:
+#   - collection community.hashi_vault (>= 2.3.0) and the `hvac` Python library
+#     importable by the interpreter that runs Ansible modules (nix: see flake.nix)
+#   - VAULT_ADDR (or `vault_addr`) and a token — VAULT_TOKEN / `vault_token`,
+#     or AppRole (`vault_pki_auth_method: approle` + role_id / secret_id)
+
+- name: Locate the root CA on the control node
+  ansible.builtin.stat:
+    path: "{{ vault_pki_root_ca_file }}"
+  register: vault_pki_root_ca_stat
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+- name: Fail when the root CA is missing
+  ansible.builtin.fail:
+    msg: >-
+      Root CA not found at {{ vault_pki_root_ca_file }} (looked up on the control node).
+      Vault's `ca_chain` stops at the issuing intermediate and OpenSSL does not accept a
+      chain ending there, so the root certificate must be present.
+  when: not (vault_pki_root_ca_stat.stat.exists | default(false))
+  run_once: true
+
+- name: Manage PKI certificates
+  ansible.builtin.include_tasks: cert.yml
+  loop: "{{ vault_pki_certs }}"
+  loop_control:
+    loop_var: cert
+    label: "{{ cert.name }}"

@@ -1,0 +1,7 @@
+---
+collections:
+  - name: community.general
+  - name: ansible.posix
+  # Needs the `hvac` Python library on the control node.
+  - name: community.hashi_vault
+    version: ">=2.3.0"

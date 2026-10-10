@@ -1,0 +1,19 @@
+#!/bin/bash
+# HAProxy health check script for Keepalived — managed by Ansible
+# {{ ansible_managed }}
+
+# Check if HAProxy is running
+if systemctl is-active --quiet haproxy; then
+    exit 0
+fi
+
+# Try to restart HAProxy
+systemctl restart haproxy
+sleep 2
+
+# Final check
+if systemctl is-active --quiet haproxy; then
+    exit 0
+fi
+
+exit 1

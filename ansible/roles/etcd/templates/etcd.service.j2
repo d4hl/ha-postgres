@@ -1,0 +1,25 @@
+[Unit]
+Description=etcd distributed key-value store
+Documentation=https://etcd.io/docs/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+User=etcd
+Group=etcd
+ExecStart=/usr/local/bin/etcd --config-file {{ etcd_conf_dir }}/etcd.conf
+ExecReload=/bin/kill -s HUP $MAINPID
+Restart=on-failure
+RestartSec=10s
+LimitNOFILE=65536
+TimeoutStopSec=30s
+
+# Security hardening
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

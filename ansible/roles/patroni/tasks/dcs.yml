@@ -1,0 +1,76 @@
+---
+# Пуш динамической конфигурации в DCS.
+
+- name: Read the dynamic configuration from the DCS
+  ansible.builtin.command:
+    cmd: >-
+      curl -sS --fail-with-body --max-time 10
+      --cert {{ patroni_etcd_client_cert }} --key {{ patroni_etcd_client_key }}
+      --cacert {{ patroni_ca_cert }}
+      -X POST https://{{ hostvars[item].ansible_host }}:{{ etcd_client_port }}/v3/kv/range
+      -d '{"key":"{{ (cluster_name ~ "/config") | b64encode }}"}'
+  loop: "{{ groups['etcd'] }}"
+  register: patroni_dcs_reads
+  changed_when: false
+  failed_when: false
+  run_once: true
+
+# Без этого недоступный etcd выглядел бы как "конфига нет" и мы бы его затёрли.
+- name: Fail when no etcd member answered
+  ansible.builtin.fail:
+    msg: >-
+      no etcd member answered on port {{ etcd_client_port }}:
+      {{ patroni_dcs_reads.results | map(attribute='stderr') | select | list | join(' | ') }}
+  when: (patroni_dcs_reads.results | selectattr('rc', 'equalto', 0) | list | length) == 0
+  run_once: true
+
+- name: Pick an answering member and decode the current configuration
+  ansible.builtin.set_fact:
+    patroni_dcs_endpoint: >-
+      {{ patroni_dcs_reads.results | selectattr('rc', 'equalto', 0) | map(attribute='item') | list | first }}
+    patroni_dcs_current: >-
+      {{ ((patroni_dcs_reads.results | selectattr('rc', 'equalto', 0)
+           | map(attribute='stdout') | list | first) | from_json).kvs | default([], true)
+         | map(attribute='value') | map('b64decode') | map('from_json') | list
+         | first | default({}, true) }}
+  run_once: true
+
+- name: Report the DCS state
+  ansible.builtin.debug:
+    msg: "DCS: {{ 'matches group_vars' if patroni_dcs_current == patroni_dcs else 'differs — will be rewritten' }}"
+  run_once: true
+
+- name: Ensure the backup directory exists
+  ansible.builtin.file:
+    path: /var/backups
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  run_once: true
+
+- name: Back up the current DCS configuration
+  ansible.builtin.copy:
+    content: "{{ patroni_dcs_current | to_nice_json }}"
+    dest: /var/backups/patroni-dcs-config.json
+    owner: root
+    group: root
+    mode: "0600"
+    backup: true
+  when:
+    - patroni_dcs_current | length > 0
+    - patroni_dcs_current != patroni_dcs
+  run_once: true
+
+- name: Push the configuration into the DCS
+  ansible.builtin.command:
+    cmd: >-
+      curl -sS --fail-with-body --max-time 10
+      --cert {{ patroni_etcd_client_cert }} --key {{ patroni_etcd_client_key }}
+      --cacert {{ patroni_ca_cert }}
+      -X POST https://{{ hostvars[patroni_dcs_endpoint].ansible_host }}:{{ etcd_client_port }}/v3/kv/put
+      -d '{"key":"{{ (cluster_name ~ "/config") | b64encode }}",
+           "value":"{{ patroni_dcs | to_json | b64encode }}"}'
+  changed_when: true
+  when: patroni_dcs_current != patroni_dcs
+  run_once: true

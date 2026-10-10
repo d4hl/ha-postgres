@@ -1,0 +1,72 @@
+# Patroni configuration — managed by Ansible
+# {{ ansible_managed }}
+
+scope: {{ cluster_name }}
+name: {{ inventory_hostname }}
+
+restapi:
+  listen: 0.0.0.0:{{ patroni_port }}
+  connect_address: {{ ansible_host }}:{{ patroni_port }}
+  authentication:
+    username: "{{ patroni_api_user }}"
+    password: "{{ patroni_api_password }}"
+
+# DCS: etcd cluster (mutual TLS, client certificate issued via Vault PKI)
+etcd3:
+  hosts:
+{% for host in groups['etcd'] %}
+    - {{ hostvars[host].ansible_host }}:{{ etcd_client_port }}
+{% endfor %}
+  protocol: https
+  cacert: {{ patroni_ca_cert }}
+  cert: {{ patroni_etcd_client_cert }}
+  key: {{ patroni_etcd_client_key }}
+
+bootstrap:
+  # Appended to the pg_hba.conf created by initdb. The same list is in the DCS
+  # below, so it can be changed on a live cluster (see group_vars/postgres).
+  pg_hba:
+{{ patroni_pg_hba | to_nice_yaml(indent=2) | indent(4, first=true) }}
+  dcs:
+{{ patroni_dcs | to_nice_yaml(indent=2, sort_keys=false) | indent(4, first=true) }}
+
+postgresql:
+  listen: 0.0.0.0:{{ postgresql_port }}
+  connect_address: {{ ansible_host }}:{{ postgresql_port }}
+  data_dir: {{ patroni_data_dir }}
+  bin_dir: {{ patroni_bin_dir }}
+  pgpass: /tmp/pgpass
+  authentication:
+    replication:
+      username: "{{ patroni_replication_user }}"
+      password: "{{ patroni_replication_password }}"
+      sslmode: verify-full
+      sslcert: "{{ patroni_pg_cert }}"
+      sslkey: "{{ patroni_pg_key }}"
+      sslrootcert: "{{ patroni_ca_cert }}"
+    superuser:
+      username: "{{ patroni_superuser }}"
+      password: "{{ patroni_superuser_password }}"
+    rewind:
+      username: "{{ patroni_rewind_user }}"
+      password: "{{ patroni_rewind_password }}"
+      sslmode: verify-full
+      sslcert: "{{ patroni_pg_cert }}"
+      sslkey: "{{ patroni_pg_key }}"
+      sslrootcert: "{{ patroni_ca_cert }}"
+  parameters:
+    unix_socket_directories: /tmp
+
+tags:
+  nofailover: false
+
+watchdog:
+  mode: automatic
+
+logging:
+  log_dir: "{{ patroni_log_dir }}"
+  log_level: INFO
+  log_file: "{{ patroni_log_dir }}/patroni.log"
+  log_file_mode: 0644
+  log_file_count: 10
+  log_file_size: 26214400
